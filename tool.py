@@ -3,6 +3,11 @@ import os
 from openai import OpenAI
 from model import FirmwareScaffold
 
+
+class SchematicAnalysisError(Exception):
+    """Raised when the vision provider does not return a usable scaffold."""
+
+
 SYSTEM_PROMPT = """You are an expert embedded systems engineer, electrical schematic auditor, and firmware architect.
 Your job is to analyze hand-drawn hardware block diagrams, breadboard sketches, or circuit schematics.
 
@@ -62,4 +67,13 @@ def analyze_schematic(
         temperature=0.2
     )
 
-    return response.choices[0].message.parsed
+    if not response.choices:
+        raise SchematicAnalysisError("The provider returned no response choices.")
+
+    message = response.choices[0].message
+    if message.refusal:
+        raise SchematicAnalysisError("The provider refused the schematic analysis.")
+    if message.parsed is None:
+        raise SchematicAnalysisError("The provider returned no structured scaffold.")
+
+    return message.parsed

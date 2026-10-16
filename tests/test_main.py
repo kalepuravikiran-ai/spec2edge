@@ -17,12 +17,34 @@ class AppTests(unittest.TestCase):
         self.assertIn("Spec2Edge", homepage.text)
         self.assertEqual(self.client.get("/healthz").json(), {"status": "ok"})
 
+    def test_reports_analysis_availability_without_exposing_key(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-secret"}):
+            response = self.client.get("/api/v1/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"analysis_available": True})
+        self.assertNotIn("test-secret", response.text)
+
+    def test_reports_missing_analysis_configuration(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
+            response = self.client.get("/api/v1/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"analysis_available": False})
+
     def test_rejects_unsupported_image_type(self):
         response = self.client.post(
             "/api/v1/analyze",
             files={"file": ("diagram.gif", b"image", "image/gif")},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_rejects_image_with_invalid_contents(self):
+        with patch("main.analyze_schematic") as analyze_schematic:
+            response = self.client.post(
+                "/api/v1/analyze",
+                files={"file": ("diagram.png", b"not actually an image", "image/png")},
+            )
+        self.assertEqual(response.status_code, 400)
+        analyze_schematic.assert_not_called()
 
     def test_rejects_unsupported_framework(self):
         response = self.client.post(
@@ -52,16 +74,37 @@ class AppTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/v1/analyze",
-            files={"file": ("diagram.png", b"image", "image/png")},
+            files={
+                "file": (
+                    "diagram.png",
+                    b"\x89PNG\r\n\x1a\nimage",
+                    "image/png",
+                )
+            },
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["target_mcu"], "ESP32")
         analyze_schematic.assert_called_once_with(
-            image_bytes=b"image",
+            image_bytes=b"\x89PNG\r\n\x1a\nimage",
             mime_type="image/png",
             preferred_framework="Arduino C++",
         )
+
+    @patch("main.analyze_schematic", side_effect=ValueError("missing key"))
+    def test_reports_missing_api_key_clearly(self, _analyze_schematic):
+        response = self.client.post(
+            "/api/v1/analyze",
+            files={
+                "file": (
+                    "diagram.png",
+                    b"\x89PNG\r\n\x1a\nimage",
+                    "image/png",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("OPENAI_API_KEY", response.json()["detail"])
 
 
 if __name__ == "__main__":

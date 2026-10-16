@@ -4,10 +4,10 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
-from openai import OpenAIError
+from openai import APIConnectionError, AuthenticationError, OpenAIError, RateLimitError
 
 from model import FirmwareScaffold
-from tool import analyze_schematic
+from tool import SchematicAnalysisError, analyze_schematic
 
 load_dotenv()
 
@@ -19,6 +19,14 @@ SUPPORTED_FRAMEWORKS = {
     "ESP32 MicroPython",
     "Raspberry Pi Pico MicroPython",
     "STM32 C (HAL)",
+}
+
+IMAGE_SIGNATURES = {
+    "image/jpeg": lambda data: data.startswith(b"\xff\xd8\xff"),
+    "image/png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/webp": lambda data: (
+        len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP"
+    ),
 }
 
 app = FastAPI(
@@ -116,6 +124,26 @@ async def serve_demo_ui():
         const form = document.getElementById("uploadForm");
         const status = document.getElementById("status");
         const output = document.getElementById("outputArea");
+        const submitButton = document.getElementById("submitBtn");
+        let analysisAvailable = true;
+
+        const checkAnalysisAvailability = async () => {
+          try {
+            const response = await fetch("/api/v1/status");
+            if (!response.ok) throw new Error("Status check failed.");
+            const data = await response.json();
+            analysisAvailable = data.analysis_available;
+            if (!analysisAvailable) {
+              status.textContent = "Diagram analysis is not configured yet. The service owner must add OPENAI_API_KEY in the hosting settings.";
+              status.style.color = "#e7c98b";
+              submitButton.disabled = true;
+            }
+          } catch {
+            status.textContent = "Could not check analysis availability. Please refresh and try again.";
+            status.style.color = "#fca5a5";
+          }
+        };
+
         const addListItems = (list, values) => {
           list.replaceChildren();
           for (const value of values) {
@@ -127,10 +155,16 @@ async def serve_demo_ui():
 
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
-          const button = document.getElementById("submitBtn");
+          const button = submitButton;
           const image = document.getElementById("imageFile").files[0];
           status.textContent = "";
+          status.style.color = "#fca5a5";
           output.hidden = true;
+          if (!analysisAvailable) {
+            status.textContent = "Diagram analysis is unavailable until the service owner configures OPENAI_API_KEY.";
+            status.style.color = "#e7c98b";
+            return;
+          }
           button.disabled = true;
           button.textContent = "Analyzing…";
 
@@ -165,10 +199,12 @@ async def serve_demo_ui():
           } catch (error) {
             status.textContent = error.message;
           } finally {
-            button.disabled = false;
+            button.disabled = !analysisAvailable;
             button.textContent = "Analyze diagram";
           }
         });
+
+        checkAnalysisAvailability();
       </script>
     </body>
     </html>
@@ -178,6 +214,12 @@ async def serve_demo_ui():
 @app.get("/healthz")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/status")
+async def analysis_status():
+    """Report whether diagram analysis has been configured, without exposing secrets."""
+    return {"analysis_available": bool(os.getenv("OPENAI_API_KEY", "").strip())}
 
 
 @app.post("/api/v1/analyze", response_model=FirmwareScaffold)
@@ -200,6 +242,11 @@ async def analyze_diagram_endpoint(
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
     if len(image_bytes) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
+    if not IMAGE_SIGNATURES[file.content_type](image_bytes):
+        raise HTTPException(
+            status_code=400,
+            detail="The file contents do not match the selected image type.",
+        )
 
     try:
         scaffold = analyze_schematic(
@@ -207,11 +254,35 @@ async def analyze_diagram_endpoint(
             mime_type=file.content_type,
             preferred_framework=framework,
         )
+    except SchematicAnalysisError as error:
+        logger.error("Schematic analysis returned no usable result: %s", error)
+        raise HTTPException(
+            status_code=502,
+            detail="The analysis provider returned no usable result. Please try a clearer diagram.",
+        ) from error
     except ValueError as error:
         logger.error("Schematic analysis is not configured: %s", error)
         raise HTTPException(
             status_code=503,
             detail="Schematic analysis is not configured. Set OPENAI_API_KEY.",
+        ) from error
+    except AuthenticationError as error:
+        logger.error("OpenAI rejected the configured API key.")
+        raise HTTPException(
+            status_code=503,
+            detail="The analysis provider rejected its API key. The service owner must check OPENAI_API_KEY.",
+        ) from error
+    except RateLimitError as error:
+        logger.warning("OpenAI rate limit or account quota reached.")
+        raise HTTPException(
+            status_code=503,
+            detail="The analysis provider is rate-limited or out of quota. Please try again later.",
+        ) from error
+    except APIConnectionError as error:
+        logger.exception("Could not connect to the OpenAI analysis provider.")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach the analysis provider. Please try again.",
         ) from error
     except OpenAIError as error:
         logger.exception("OpenAI schematic analysis failed")
