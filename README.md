@@ -33,8 +33,8 @@ The browser demo accepts JPG, PNG, and WEBP images up to 10 MB. Analysis uses th
 
 1. Push this project to a GitHub repository. Keep `.env` out of the repository; `.gitignore` excludes it.
 2. In Render, create a new **Blueprint** and connect that repository. Render reads `render.yaml` to build and start the web service.
-3. Set `OPENAI_API_KEY` in the service's environment settings. Do not put the key in `render.yaml` or GitHub.
-4. The Blueprint requests Render's free web-service plan. Wait for the deployment and health check to pass; Render provides a public `https://<service-name>.onrender.com` URL. Free services can spin down after inactivity and take a little time to start again.
+3. The Blueprint requests Render's free web-service plan and does not require an API key to create the public site. To enable diagram analysis, add `OPENAI_API_KEY` under the service's **Environment** settings in Render and redeploy. Do not put the key in `render.yaml` or GitHub.
+4. Wait for the deployment and health check to pass; Render provides a public `https://<service-name>.onrender.com` URL. Free services can spin down after inactivity and take a little time to start again.
 
 The service uses the configured API key for every visitor's analysis. Share the URL only with that in mind, and set usage limits or billing alerts on the OpenAI account.
 
